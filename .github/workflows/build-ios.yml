@@ -1,0 +1,95 @@
+name: Build iOS (unsigned IPA)
+
+# Dijalankan manual dari tab Actions (tombol "Run workflow").
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CI: "1"
+  EXPO_NO_TELEMETRY: "1"
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - name: Ambil kode
+        uses: actions/checkout@v4
+
+      - name: Pasang Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Pasang library
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+      - name: Atur identitas aplikasi (hanya di server, file asli tidak berubah)
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const j = JSON.parse(fs.readFileSync('app.json', 'utf8'));
+          j.expo = j.expo || {};
+          j.expo.name = 'Mymeowney';
+          j.expo.icon = './assets/images/icon.png';
+          j.expo.ios = j.expo.ios || {};
+          delete j.expo.ios.icon;
+          j.expo.ios.bundleIdentifier = j.expo.ios.bundleIdentifier || 'com.nunuymajdiah.mymeowney';
+          j.expo.plugins = (j.expo.plugins || []).map((p) => {
+            if (Array.isArray(p) && p[0] === 'expo-splash-screen') {
+              const c = Object.assign({}, p[1] || {});
+              c.backgroundColor = '#FFF8EE';
+              delete c.dark;
+              return [p[0], c];
+            }
+            return p;
+          });
+          fs.writeFileSync('app.json', JSON.stringify(j, null, 2));
+          console.log(JSON.stringify(j.expo, null, 2));
+          NODE
+
+      - name: Buat proyek native iOS
+        run: npx expo prebuild --platform ios --clean
+
+      - name: Versi Xcode
+        run: xcodebuild -version
+
+      - name: Bangun aplikasi (tanpa tanda tangan)
+        working-directory: ios
+        run: |
+          WORKSPACE=$(ls -d *.xcworkspace | head -n 1)
+          SCHEME="${WORKSPACE%.xcworkspace}"
+          echo "Workspace: $WORKSPACE | Scheme: $SCHEME"
+          xcodebuild \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Kemas menjadi file .ipa
+        run: |
+          APP=$(find ios/build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -n 1)
+          echo "Aplikasi ditemukan: $APP"
+          test -n "$APP"
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry Mymeowney-unsigned.ipa Payload
+          ls -la Mymeowney-unsigned.ipa
+
+      - name: Simpan hasil build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mymeowney-ipa
+          path: Mymeowney-unsigned.ipa
+          retention-days: 14
+          if-no-files-found: error
